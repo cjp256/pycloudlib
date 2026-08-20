@@ -22,6 +22,16 @@ tenant_id = ""
 # public_key_path = "~/.ssh/id_rsa.pub"
 # private_key_path = ""  # Defaults to 'public_key_path' without the '.pub'
 # key_name = ""  # Defaults to your username if not set
+# Arbitrary parameters deep-merged into Azure resource creation payloads:
+# Values shown match current Azure defaults where Azure defines one.
+[azure.resource_parameters]
+# network_interface.properties.enableAcceleratedNetworking = false
+# network_security_group.properties.flushConnection = false
+# public_ip_address.properties.idleTimeoutInMinutes = 4
+# resource_group.tags.environment = "test"
+# subnet.properties.defaultOutboundAccess = false
+# virtual_machine.properties.diagnosticsProfile.bootDiagnostics.enabled = true
+# virtual_network.properties.flowTimeoutInMinutes = 4
 
 [ec2]
 region = ""  # in ~/.aws/config

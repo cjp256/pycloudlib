@@ -9,10 +9,20 @@ from azure.core.exceptions import ResourceNotFoundError
 
 from pycloudlib.azure.cloud import Azure
 from pycloudlib.azure.util import AzureCreateParams, AzureParams
+from pycloudlib.errors import CloudSetupError
 
 CONFIG = """\
 [azure]
 
+"""
+
+RESOURCE_PARAMETERS_CONFIG = """\
+[azure]
+resource_parameters.subnet.properties.defaultOutboundAccess = false
+
+[[azure.resource_parameters.public_ip_address.properties.ipTags]]
+ipTagType = "RoutingPreference"
+tag = "Internet"
 """
 
 resource_client_mock = mock.MagicMock()
@@ -134,6 +144,96 @@ class TestCreateNetworkInterfaceClient:
         ]
 
         assert expected_calls == network_group_mock.begin_create_or_update.call_args_list
+
+
+@pytest.mark.mock_ssh_keys
+class TestResourceParameters:
+    """Tests covering generic Azure resource parameters."""
+
+    @mock.patch.object(Azure, "_create_resource_group")
+    @mock.patch("pycloudlib.azure.util.get_client")
+    def test_merge_precedence(self, _m_get_client, _m_create_resource_group):
+        """Per-call parameters override constructor and config defaults."""
+        cloud = Azure(
+            tag="tag",
+            timestamp_suffix=False,
+            config_file=StringIO(RESOURCE_PARAMETERS_CONFIG),
+            resource_parameters={"subnet": {"properties": {"defaultOutboundAccess": True}}},
+        )
+
+        parameters = cloud._merge_resource_parameters(
+            "subnet",
+            {"properties": {"addressPrefix": "10.0.0.0/24"}},
+            {"properties": {"defaultOutboundAccess": False}},
+        )
+
+        assert parameters == {
+            "properties": {
+                "addressPrefix": "10.0.0.0/24",
+                "defaultOutboundAccess": False,
+            }
+        }
+
+    @mock.patch.object(Azure, "_create_resource_group")
+    @mock.patch("pycloudlib.azure.util.get_client")
+    def test_unknown_target_raises(self, _m_get_client, _m_create_resource_group):
+        """Reject misspelled resource targets instead of ignoring them."""
+        with pytest.raises(
+            CloudSetupError,
+            match="Unknown Azure resource parameter targets: subent",
+        ):
+            Azure(
+                tag="tag",
+                timestamp_suffix=False,
+                config_file=StringIO(CONFIG),
+                resource_parameters={"subent": {"properties": {}}},
+            )
+
+    @mock.patch.object(Azure, "_create_resource_group")
+    @mock.patch("pycloudlib.azure.util.get_client")
+    def test_virtual_machine_parameters(self, m_get_client, m_create_resource_group):
+        """Merge VM defaults before applying per-call parameters."""
+        compute_client = mock.MagicMock()
+        m_get_client.side_effect = [
+            mock.MagicMock(),
+            mock.MagicMock(),
+            compute_client,
+        ]
+        m_create_resource_group.return_value.name = "resource-group"
+        vm_poller = compute_client.virtual_machines.begin_create_or_update.return_value
+        vm_poller.done.return_value = True
+        cloud = Azure(
+            tag="tag",
+            timestamp_suffix=False,
+            config_file=StringIO(CONFIG),
+            resource_parameters={
+                "virtual_machine": {
+                    "properties": {
+                        "evictionPolicy": "Delete",
+                        "priority": "Spot",
+                    }
+                }
+            },
+        )
+
+        with mock.patch.object(
+            type(cloud.key_pair),
+            "public_key_content",
+            new_callable=mock.PropertyMock,
+            return_value="ssh-rsa public-key",
+        ):
+            cloud._create_virtual_machine(
+                image_id="Canonical:ubuntu-24_04-lts:server:latest",
+                instance_type="Standard_D2s_v3",
+                nic_ids=["nic-id"],
+                user_data=None,
+                name="vm-name",
+                vm_params={"properties": {"priority": "Regular"}},
+            )
+
+        parameters = compute_client.virtual_machines.begin_create_or_update.call_args.args[2]
+        assert parameters["properties"]["evictionPolicy"] == "Delete"
+        assert parameters["properties"]["priority"] == "Regular"
 
 
 @pytest.mark.mock_ssh_keys
@@ -363,6 +463,81 @@ class TestNonComputeParamsOverrides:
                 )
             ]
         assert expected_calls == subnets.begin_create_or_update.call_args_list
+
+    def test_subnet_resource_parameters(self, _m_get_client):
+        """Merge configured parameters into subnet creation payloads."""
+        subnets = mock.MagicMock()
+        type(network_client_mock).subnets = mock.PropertyMock(return_value=subnets)
+        type(resource_mock).name = mock.PropertyMock(return_value="default-subnet-rg")
+        type(resource_client_mock).resource_groups = mock.PropertyMock(
+            return_value=resource_group_mock
+        )
+        resource_group_mock.create_or_update.return_value = resource_mock
+        resource_group_mock.get.side_effect = ResourceNotFoundError()
+        cloud = Azure(
+            tag="pyc-test",
+            timestamp_suffix=False,
+            config_file=StringIO(RESOURCE_PARAMETERS_CONFIG),
+        )
+        cloud._create_subnet("vnet001")
+
+        expected_calls = [
+            mock.call(
+                "default-subnet-rg",
+                "vnet001",
+                "pyc-test-subnet",
+                {
+                    "properties": {
+                        "addressPrefix": "10.0.0.0/24",
+                        "defaultOutboundAccess": False,
+                    },
+                },
+                api_version="2025-05-01",
+            )
+        ]
+        assert expected_calls == subnets.begin_create_or_update.call_args_list
+
+    @mock.patch("datetime.datetime", wraps=datetime.datetime)
+    def test_ip_address_resource_parameters(self, dt, _m_get_client):
+        """Merge configured parameters into public IP creation payloads."""
+        test_dt = datetime.datetime(2024, 2, 1, 16, 58, 45, 948199)
+        dt.now.return_value = test_dt
+        us = test_dt.strftime("%f")
+        public_ip_addresses = mock.MagicMock()
+        type(network_client_mock).public_ip_addresses = mock.PropertyMock(
+            return_value=public_ip_addresses
+        )
+        type(resource_mock).name = mock.PropertyMock(return_value="default-ip-rg")
+        type(resource_client_mock).resource_groups = mock.PropertyMock(
+            return_value=resource_group_mock
+        )
+        resource_group_mock.create_or_update.return_value = resource_mock
+        resource_group_mock.get.side_effect = ResourceNotFoundError()
+        cloud = Azure(
+            tag="pyc-test",
+            timestamp_suffix=False,
+            config_file=StringIO(RESOURCE_PARAMETERS_CONFIG),
+        )
+        cloud._create_ip_address()
+
+        expected_calls = [
+            mock.call(
+                "default-ip-rg",
+                "{}-{}-ip".format(cloud.tag, us),
+                {
+                    "location": cloud.location,
+                    "sku": {"name": "Standard"},
+                    "properties": {
+                        "publicIPAllocationMethod": "Static",
+                        "publicIPAddressVersion": "IPv4",
+                        "ipTags": [{"ipTagType": "RoutingPreference", "tag": "Internet"}],
+                    },
+                    "tags": {"name": cloud.tag},
+                },
+                api_version="2025-05-01",
+            )
+        ]
+        assert expected_calls == public_ip_addresses.begin_create_or_update.call_args_list
 
     @pytest.mark.parametrize(
         "ip_obj",

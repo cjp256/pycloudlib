@@ -6,7 +6,7 @@ import base64
 import contextlib
 import datetime
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.mgmt.compute import ComputeManagementClient
@@ -18,6 +18,7 @@ from pycloudlib.azure.instance import AzureInstance, VMInstanceStatus
 from pycloudlib.cloud import BaseCloud, ImageType
 from pycloudlib.config import ConfigFile
 from pycloudlib.errors import (
+    CloudSetupError,
     InstanceNotFoundError,
     NetworkNotFoundError,
     PycloudlibError,
@@ -84,6 +85,18 @@ UBUNTU_CVM_IMAGES = {
 
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
 
+_RESOURCE_PARAMETER_TARGETS = frozenset(
+    {
+        "network_interface",
+        "network_security_group",
+        "public_ip_address",
+        "resource_group",
+        "subnet",
+        "virtual_machine",
+        "virtual_network",
+    }
+)
+
 
 class Azure(BaseCloud):
     """Azure Cloud Class."""
@@ -104,6 +117,7 @@ class Azure(BaseCloud):
         resource_group_params: Optional[util.AzureParams] = None,
         username: Optional[str] = None,
         enable_boot_diagnostics: bool = False,
+        resource_parameters: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """Initialize the connection to Azure.
 
@@ -124,6 +138,11 @@ class Azure(BaseCloud):
             resource_group_params: The resource group override parameters.
             enable_boot_diagnostics: flag to configure if boot diagnostics
                 logs will be enabled and obtained for instances created.
+            resource_parameters: arbitrary parameters to merge into Azure
+                resource creation payloads, grouped by resource type. Per-call
+                parameters take precedence over these defaults. Supported
+                resource types are the values in
+                ``_RESOURCE_PARAMETER_TARGETS``.
         """
         super().__init__(
             tag,
@@ -142,6 +161,29 @@ class Azure(BaseCloud):
         self._log.debug("logging into Azure")
         self.location = region or self.config.get("region") or "centralus"
         self.username = username or "ubuntu"
+        self.resource_parameters: Dict[str, Dict[str, Any]] = {}
+        update_nested(
+            self.resource_parameters,
+            self.config.get("resource_parameters", {}),
+        )
+        if resource_parameters:
+            update_nested(self.resource_parameters, resource_parameters)
+        unknown_targets = sorted(
+            set(self.resource_parameters).difference(_RESOURCE_PARAMETER_TARGETS)
+        )
+        if unknown_targets:
+            raise CloudSetupError(
+                "Unknown Azure resource parameter targets: {}".format(", ".join(unknown_targets))
+            )
+        invalid_targets = sorted(
+            target
+            for target, parameters in self.resource_parameters.items()
+            if not isinstance(parameters, dict)
+        )
+        if invalid_targets:
+            raise CloudSetupError(
+                "Azure resource parameters must be tables: {}".format(", ".join(invalid_targets))
+            )
 
         self.registered_instances: Dict[str, AzureInstance] = {}
         self.registered_images: Dict[str, dict] = {}
@@ -182,6 +224,13 @@ class Azure(BaseCloud):
                     self._log.info("Boot diagnostics for %s:", instance.name)
                     self._log.info("%s", instance.console_log())
         super().__exit__(exc_type, exc_value, exc_traceback)
+
+    def _merge_resource_parameters(self, target, parameters, overrides=None):
+        """Merge configured and per-call parameters into an Azure payload."""
+        update_nested(parameters, self.resource_parameters.get(target, {}))
+        if overrides:
+            update_nested(parameters, overrides)
+        return parameters
 
     def image_serial(self, image_id):
         """Find the image serial of the latest daily image for a particular release.
@@ -267,8 +316,11 @@ class Azure(BaseCloud):
             },
         }
 
-        if network_security_group_params and network_security_group_params.parameters:
-            update_nested(parameters, network_security_group_params.parameters)
+        self._merge_resource_parameters(
+            "network_security_group",
+            parameters,
+            (network_security_group_params.parameters if network_security_group_params else None),
+        )
 
         nsg_poller = nsg_group.begin_create_or_update(
             resource_group_name=resource_group_name,
@@ -304,8 +356,11 @@ class Azure(BaseCloud):
 
         parameters = {"location": self.location, "tags": {"name": self.tag}}
 
-        if resource_group_params and resource_group_params.parameters:
-            update_nested(parameters, resource_group_params.parameters)
+        self._merge_resource_parameters(
+            "resource_group",
+            parameters,
+            resource_group_params.parameters if resource_group_params else None,
+        )
 
         resource_group = self.resource_client.resource_groups.create_or_update(
             resource_name,
@@ -350,8 +405,11 @@ class Azure(BaseCloud):
             },
             "tags": {"name": self.tag},
         }
-        if virtual_network_params and virtual_network_params.parameters:
-            update_nested(parameters, virtual_network_params.parameters)
+        self._merge_resource_parameters(
+            "virtual_network",
+            parameters,
+            virtual_network_params.parameters if virtual_network_params else None,
+        )
 
         self._log.debug("Creating Azure virtual network")
         network_poller = self.network_client.virtual_networks.begin_create_or_update(
@@ -394,8 +452,11 @@ class Azure(BaseCloud):
                 "addressPrefix": address_prefix,
             },
         }
-        if subnet_params and subnet_params.parameters:
-            update_nested(parameters, subnet_params.parameters)
+        self._merge_resource_parameters(
+            "subnet",
+            parameters,
+            subnet_params.parameters if subnet_params else None,
+        )
 
         self._log.debug("Creating Azure subnet")
         subnet_poller = self.network_client.subnets.begin_create_or_update(
@@ -436,9 +497,11 @@ class Azure(BaseCloud):
             },
             "tags": {"name": self.tag},
         }
-
-        if ip_addr_params and ip_addr_params.parameters:
-            update_nested(parameters, ip_addr_params.parameters)
+        self._merge_resource_parameters(
+            "public_ip_address",
+            parameters,
+            ip_addr_params.parameters if ip_addr_params else None,
+        )
 
         self._log.debug("Creating Azure ip address")
         ip_poller = self.network_client.public_ip_addresses.begin_create_or_update(
@@ -497,8 +560,11 @@ class Azure(BaseCloud):
             "tags": {"name": self.tag},
         }
 
-        if nic_params and nic_params.parameters:
-            update_nested(nic_config, nic_params.parameters)
+        self._merge_resource_parameters(
+            "network_interface",
+            nic_config,
+            nic_params.parameters if nic_params else None,
+        )
 
         self._log.debug("Creating Azure network interface")
         nic_poller = self.network_client.network_interfaces.begin_create_or_update(
@@ -624,8 +690,7 @@ class Azure(BaseCloud):
         if not name:
             name = "{}-vm".format(self.tag)
         params = self._create_vm_parameters(name, image_id, instance_type, nic_ids, user_data)
-        if vm_params:
-            update_nested(params, vm_params)
+        self._merge_resource_parameters("virtual_machine", params, vm_params)
         self._log.debug("Creating Azure virtual machine: %s", name)
         try:
             vm_poller = self.compute_client.virtual_machines.begin_create_or_update(
