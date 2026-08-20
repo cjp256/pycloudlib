@@ -5,7 +5,8 @@ import logging
 import re
 from typing import Any, Dict, NamedTuple, Optional
 
-from azure.identity import ClientSecretCredential
+from azure.core.credentials import TokenCredential
+from azure.identity import AzureCliCredential, ClientSecretCredential
 
 from pycloudlib.errors import CloudSetupError
 
@@ -57,36 +58,48 @@ class AzureCreateParams(NamedTuple):
     parameters: Optional[Dict[str, Any]]
 
 
-def get_client(resource, config_dict: dict):
-    """Get azure client based on the give resource.
+def get_client(resource, config_dict: dict, use_azure_cli_credential: bool = False):
+    """Get an Azure management client for the given resource.
 
-    This method will first verify if we can get the client
-    by using the information provided on the login account
-    of the user machine. If the user is not logged into Azure,
-    we will try to get the client from the ids given by the
-    user to this class.
+    Authentication uses a service principal by default. Set
+    ``use_azure_cli_credential`` to reuse the local ``az login`` session
+    instead.
 
     Args:
         resource: Azure Resource, An Azure resource that we want to get
                   a client for.
         config_dict: dict, Id parameters passed by the user to this class.
+        use_azure_cli_credential: use Azure CLI credentials instead of a
+            service principal.
 
     Returns:
         The client for the resource passed as parameter.
 
+    Raises:
+        CloudSetupError: if configuration required by the selected
+            authentication method is missing.
+
     """
-    required_keys = frozenset({"clientId", "clientSecret", "tenantId", "subscriptionId"})
-    missing_keys = required_keys.difference(set(config_dict.keys()))
+    required_keys = {"subscriptionId"}
+    if not use_azure_cli_credential:
+        required_keys.update({"clientId", "clientSecret", "tenantId"})
+
+    missing_keys = sorted(key for key in required_keys if not config_dict.get(key))
     if missing_keys:
         raise CloudSetupError(
-            "Missing required Azure credentials: {}".format(", ".join(missing_keys))
+            "Missing required Azure configuration: {}".format(", ".join(missing_keys))
         )
 
-    credential = ClientSecretCredential(
-        tenant_id=config_dict["tenantId"],
-        client_id=config_dict["clientId"],
-        client_secret=config_dict["clientSecret"],
-    )
+    credential: TokenCredential
+    if use_azure_cli_credential:
+        logger.debug("Using Azure CLI credentials from the local az login session")
+        credential = AzureCliCredential()
+    else:
+        credential = ClientSecretCredential(
+            tenant_id=config_dict["tenantId"],
+            client_id=config_dict["clientId"],
+            client_secret=config_dict["clientSecret"],
+        )
 
     return resource(credential, subscription_id=config_dict["subscriptionId"])
 

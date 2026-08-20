@@ -98,6 +98,7 @@ class Azure(BaseCloud):
         *,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
+        use_azure_cli_credential: bool = False,
         subscription_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
         region: Optional[str] = None,
@@ -107,9 +108,9 @@ class Azure(BaseCloud):
     ):
         """Initialize the connection to Azure.
 
-        Azure will try to read user credentials form the /home/$USER/.azure
-        folder. However, we can overwrite those credentials with the provided
-        id parameters.
+        Azure uses service principal credentials by default. Set
+        ``use_azure_cli_credential`` to use credentials from the local
+        ``az login`` session instead.
 
         Args:
             tag: string used to name and tag resources with
@@ -118,6 +119,8 @@ class Azure(BaseCloud):
             config_file: path to pycloudlib configuration file
             client_id: user's client id
             client_secret: user's client secret access key
+            use_azure_cli_credential: use Azure CLI credentials instead of a
+                service principal.
             subscription_id: user's subscription id key
             tenant_id: user's tenant id key
             region: The region where the instance will be created
@@ -125,16 +128,16 @@ class Azure(BaseCloud):
             enable_boot_diagnostics: flag to configure if boot diagnostics
                 logs will be enabled and obtained for instances created.
         """
+        required_values = (
+            [subscription_id]
+            if use_azure_cli_credential
+            else [client_id, client_secret, subscription_id, tenant_id]
+        )
         super().__init__(
             tag,
             timestamp_suffix,
             config_file,
-            required_values=[
-                client_id,
-                client_secret,
-                subscription_id,
-                tenant_id,
-            ],
+            required_values=required_values,
         )
 
         self.created_resource_groups: List = []
@@ -164,11 +167,27 @@ class Azure(BaseCloud):
         if tenant_id:
             config_dict["tenantId"] = tenant_id
 
-        self.resource_client = util.get_client(ResourceManagementClient, config_dict)
+        use_azure_cli_credential = bool(
+            use_azure_cli_credential or self.config.get("use_azure_cli_credential", False)
+        )
 
-        self.network_client = util.get_client(NetworkManagementClient, config_dict)
+        self.resource_client = util.get_client(
+            ResourceManagementClient,
+            config_dict,
+            use_azure_cli_credential=use_azure_cli_credential,
+        )
 
-        self.compute_client = util.get_client(ComputeManagementClient, config_dict)
+        self.network_client = util.get_client(
+            NetworkManagementClient,
+            config_dict,
+            use_azure_cli_credential=use_azure_cli_credential,
+        )
+
+        self.compute_client = util.get_client(
+            ComputeManagementClient,
+            config_dict,
+            use_azure_cli_credential=use_azure_cli_credential,
+        )
 
         self.resource_group = self._create_resource_group(resource_group_params)
         self.base_tag = tag

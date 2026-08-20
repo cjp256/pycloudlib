@@ -13,9 +13,11 @@
 ##############################################################################
 
 [azure]
-# Credentials can be found with `az ad sp create-for-rbac --sdk-auth`
+# Service principal credentials: `az ad sp create-for-rbac --sdk-auth`
 client_id = ""
 client_secret = ""
+# Set true to use credentials from your local `az login` session instead.
+# use_azure_cli_credential = true
 subscription_id = ""
 tenant_id = ""
 # region = "centralus"

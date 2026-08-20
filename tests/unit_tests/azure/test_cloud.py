@@ -15,6 +15,12 @@ CONFIG = """\
 
 """
 
+AZURE_CLI_CONFIG = """\
+[azure]
+subscription_id = "subscription-id"
+use_azure_cli_credential = true
+"""
+
 resource_client_mock = mock.MagicMock()
 resource_group_mock = mock.MagicMock()
 resource_mock = mock.MagicMock()
@@ -22,6 +28,50 @@ resource_mock = mock.MagicMock()
 network_client_mock = mock.MagicMock()
 network_group_mock = mock.MagicMock()
 compute_client_mock = mock.MagicMock()
+
+
+@pytest.mark.mock_ssh_keys
+class TestCredentials:
+    """Tests covering Azure credential configuration."""
+
+    @pytest.mark.parametrize(
+        ("config", "kwargs"),
+        (
+            (None, {"subscription_id": "subscription-id", "use_azure_cli_credential": True}),
+            (AZURE_CLI_CONFIG, {}),
+        ),
+    )
+    @mock.patch.object(Azure, "_create_resource_group")
+    @mock.patch("pycloudlib.azure.util.get_client")
+    def test_azure_cli_credential_opt_in(
+        self, m_get_client, m_create_resource_group, config, kwargs
+    ):
+        """Enable Azure CLI credentials by constructor or config file."""
+        Azure(
+            tag="tag",
+            timestamp_suffix=False,
+            config_file=StringIO(config) if config else None,
+            **kwargs,
+        )
+
+        assert m_get_client.call_args_list == [
+            mock.call(
+                mock.ANY,
+                {"subscriptionId": "subscription-id"},
+                use_azure_cli_credential=True,
+            ),
+            mock.call(
+                mock.ANY,
+                {"subscriptionId": "subscription-id"},
+                use_azure_cli_credential=True,
+            ),
+            mock.call(
+                mock.ANY,
+                {"subscriptionId": "subscription-id"},
+                use_azure_cli_credential=True,
+            ),
+        ]
+        m_create_resource_group.assert_called_once_with(None)
 
 
 # Disable this one because we're intentionally testing a protected member

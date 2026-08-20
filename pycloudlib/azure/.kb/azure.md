@@ -12,7 +12,7 @@ Read the top-level `.kb/agents.md` file before continuing below.
 
 # Important
 
-- Credentials can be obtained via `az ad sp create-for-rbac --sdk-auth`; otherwise read from `~/.azure`. See `pycloudlib.toml.template` `[azure]` for the required/optional keys.
+- Service principal credentials are used by default; set `use_azure_cli_credential` to use the local `az login` session. See `pycloudlib.toml.template` `[azure]` for the required/optional keys.
 - Image selection dispatches `ImageType` to module-level URN dicts in `cloud.py`; when adding a release, update every relevant dict rather than relying on a single map.
 - mypy has `check_untyped_defs = false` for `pycloudlib.azure.cloud`/`instance` (see the TODO overrides in `pyproject.toml`); prefer fixing typing over widening this.
 
